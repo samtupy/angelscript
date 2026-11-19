@@ -2044,12 +2044,40 @@ bool TestScopedInitList()
 			"  scoped s(10); \n"
 			"  scopedsum t = {scoped(1), s, scoped(100)}; \n"
 			"  assert( s.value == 10 ); \n"
+			"} \n"
+			"bool no() { return false; } \n"
+			"void cond() \n"
+			"{ \n"
+			"  bool a = false; \n"
+			"  scoped s1 = a ? scoped(1) : scoped(2); \n"
+			"  assert( s1.value == 2 ); \n"
+			"  scoped s2 = !a ? scoped(3) : scoped(4); \n"
+			"  assert( s2.value == 3 ); \n"
+			"  scoped s3 = no() ? scoped(5) : no() ? scoped(6) : scoped(7); \n"
+			"  assert( s3.value == 7 ); \n"
+			"  assert( (a ? scoped(8) : make(9)).value == 9 ); \n"
+			"  scoped s4(10); \n"
+			"  s4 = !a ? scoped(11) : scoped(12); \n"
+			"  assert( s4.value == 11 ); \n"
+			"  scoped s5 = !a ? scoped(13) : s4; \n"
+			"  assert( s5.value == 13 ); \n"
+			"  scoped s6 = a ? scoped(14) : s4; \n"
+			"  assert( s6.value == 11 ); \n"
+			"  s4 = !a ? scoped(15) : s4; \n"
+			"  assert( s4.value == 15 ); \n"
+			"  s4 = a ? scoped(16) : s5; \n"
+			"  assert( s4.value == 13 && s5.value == 13 ); \n"
 			"} \n");
 		int r = mod->Build();
 		if( r < 0 )
 			TEST_FAILED;
 
 		r = ExecuteString(engine, "main()", mod);
+		if( r != asEXECUTION_FINISHED )
+			TEST_FAILED;
+
+		// The conditional operator copies the chosen scoped temporary into a temporary variable of its own
+		r = ExecuteString(engine, "cond()", mod);
 		if( r != asEXECUTION_FINISHED )
 			TEST_FAILED;
 

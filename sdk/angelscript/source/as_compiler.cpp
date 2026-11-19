@@ -10440,6 +10440,22 @@ int asCCompiler::CompileCondition(asCScriptNode *expr, asCExprContext *ctx)
 				return -1;
 			}
 
+			// Scoped types don't support handles, so when one expression is the handle a factory call produced and the other
+			// is a value of the same type, the handle is treated as the value rather than taking a handle to the value
+			if (le.type.dataType.IsObjectHandle() != re.type.dataType.IsObjectHandle() && le.type.dataType.GetTypeInfo() && le.type.dataType.GetTypeInfo() == re.type.dataType.GetTypeInfo() && (le.type.dataType.GetTypeInfo()->flags & asOBJ_SCOPED))
+			{
+				asCExprContext *handleExpr = le.type.dataType.IsObjectHandle() ? &le : &re;
+				// A variable on the heap holds the same pointer whether it is typed as a handle or as the object, so only the type changes
+				if (handleExpr->type.isVariable && !handleExpr->type.dataType.IsReference())
+					handleExpr->type.dataType.MakeHandle(false);
+				else
+				{
+					asCDataType dt = handleExpr->type.dataType;
+					dt.MakeHandle(false);
+					ImplicitConversion(handleExpr, dt, handleExpr == &le ? cexpr->next : cexpr->next->next, asIC_IMPLICIT_CONV);
+				}
+			}
+
 			// Try to perform an implicit cast to make the two operands of the same type
 			// Choose the conversion that is the least costly
 			if (le.type.dataType != re.type.dataType)
@@ -10668,6 +10684,14 @@ int asCCompiler::CompileCondition(asCScriptNode *expr, asCExprContext *ctx)
 					temp = le.type;
 					temp.dataType.MakeReference(false);
 					temp.dataType.MakeReadOnly(false);
+
+					// Scoped types don't support handles, but a factory call produces a handle to the new object
+					// which is released right after the assignment below, so the result must be a copy of the value
+					if( temp.dataType.IsObjectHandle() && temp.dataType.GetTypeInfo() && (temp.dataType.GetTypeInfo()->flags & asOBJ_SCOPED) )
+					{
+						temp.dataType.MakeHandle(false);
+						isExplicitHandle = false;
+					}
 
 					// Make sure the variable isn't used in any of the expressions,
 					// as it would be overwritten which may cause crashes or less visible bugs
