@@ -2002,6 +2002,8 @@ bool TestScopedInitList()
 		asIScriptEngine *engine = asCreateScriptEngine();
 		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &bout, asCALL_THISCALL);
 		RegisterScriptArray(engine, false);
+		RegisterStdString(engine);
+		RegisterScriptDictionary(engine);
 		engine->RegisterGlobalFunction("void assert(bool)", asFUNCTION(Assert), asCALL_GENERIC);
 
 		engine->RegisterObjectType("scoped", 0, asOBJ_REF | asOBJ_SCOPED);
@@ -2034,6 +2036,8 @@ bool TestScopedInitList()
 			"  assert( c.length() == 3 && c[0].value == 5 && c[1].value == 0 && c[2].value == 4 ); \n"
 			"  array<array<scoped>> d = {{scoped(6)}, {s}}; \n"
 			"  assert( d[0][0].value == 6 && d[1][0].value == 4 ); \n"
+			"  dictionary dict = {{'a', scoped(7)}, {'b', s}}; \n"
+			"  assert( dict.getSize() == 2 && s.value == 4 ); \n"
 			"} \n"
 			"void sum() \n"
 			"{ \n"

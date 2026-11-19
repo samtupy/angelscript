@@ -4233,6 +4233,11 @@ int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScr
 					dt.MakeReadOnly(false);
 					dt.MakeReference(false);
 
+					// Scoped types don't support handles, but a factory call produces a handle to
+					// the new object so the value must be stored as the type itself to get a copy
+					if( dt.IsObjectHandle() && dt.GetTypeInfo() && (dt.GetTypeInfo()->flags & asOBJ_SCOPED) )
+						dt.MakeHandle(false);
+
 					// Values on the list must be aligned to 32bit boundaries, except if the type is smaller than 32bit.
 					if( bufferSize & 0x3 )
 						bufferSize += 4 - (bufferSize & 0x3);
