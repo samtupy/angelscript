@@ -4039,6 +4039,36 @@ void asCCompiler::CompileInitList(asCExprValue *var, asCScriptNode *node, asCByt
 	ReleaseTemporaryVariable(bufferVar, bc);
 }
 
+// Scoped reference types have no AddRef behaviour, so unlike other reference types the list
+// buffer cannot simply share the object produced by the expression through a handle assignment,
+// as the expression's temporary (or the variable it refers to) would still be released afterwards
+// and leave a dangling pointer in the buffer. Instead the value is copied into a new temporary
+// variable whose reference is then moved into the list buffer, which takes ownership of it.
+void asCCompiler::CompileInitListScopedElement(asCDataType &dt, asCExprContext *arg, short bufferVar, asUINT bufferSize, asCScriptNode *node, asCByteCode &bcInit)
+{
+	asCDataType varType = dt;
+	varType.MakeReference(false);
+	varType.MakeReadOnly(false);
+	int offset = AllocateVariable(varType, true);
+
+	asCExprContext tmp(engine);
+	CompileInitAsCopy(varType, offset, &tmp, arg, node, false);
+	MergeExprBytecode(arg, &tmp);
+
+	// Move the reference from the variable to the list element and clear
+	// the variable so the object isn't released when the variable is freed
+	arg->bc.InstrSHORT(asBC_PSF, (short)offset);
+	arg->bc.InstrSHORT_DW(asBC_PshListElmnt, bufferVar, bufferSize);
+	arg->bc.InstrSHORT_DW(asBC_COPY, AS_PTR_SIZE, asTYPEID_OBJHANDLE | engine->GetTypeIdFromDataType(varType));
+	arg->bc.Instr(asBC_PopPtr);
+	arg->bc.InstrSHORT(asBC_ClrVPtr, (short)offset);
+	ReleaseTemporaryVariable(offset, &arg->bc);
+
+	ProcessDeferredParams(arg);
+
+	bcInit.AddCode(&arg->bc);
+}
+
 int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScriptNode *&valueNode, int bufferTypeId, short bufferVar, asUINT &bufferSize, asCByteCode &bcInit, int &elementsInSubList)
 {
 	if( patternNode->type == asLPT_START )
@@ -4265,6 +4295,7 @@ int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScr
 				bufferSize += 4 - (bufferSize & 0x3);
 
 			// Compile the lvalue
+			bool isScopedElement = false;
 			lctx.bc.InstrSHORT_DW(asBC_PshListElmnt, bufferVar, bufferSize);
 			lctx.type.Set(dt);
 			lctx.type.isLValue = true;
@@ -4277,6 +4308,12 @@ int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScr
 			{
 				lctx.type.isExplicitHandle = true;
 				lctx.type.dataType.MakeReference(true);
+			}
+			else if (dt.GetTypeInfo()->flags & asOBJ_SCOPED)
+			{
+				// Scoped types have no AddRef behaviour so the value is moved into the list
+				// buffer by CompileInitListScopedElement below instead of a handle assignment
+				isScopedElement = true;
 			}
 			else if (dt.GetTypeInfo()->flags & asOBJ_REF)
 			{
@@ -4326,7 +4363,9 @@ int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScr
 				}
 			}
 
-			if( lctx.type.dataType.IsNullHandle() )
+			if( isScopedElement )
+				CompileInitListScopedElement(dt, &rctx, bufferVar, bufferSize, valueNode, bcInit);
+			else if( lctx.type.dataType.IsNullHandle() )
 			{
 				// Don't add any code to assign a null handle. RefCpy doesn't work without a known type.
 				// The buffer is already initialized to zero in asBC_AllocMem anyway.
@@ -4420,25 +4459,30 @@ int asCCompiler::CompileInitListElement(asSListPatternNode *&patternNode, asCScr
 						if( bufferSize & 0x3 )
 							bufferSize += 4 - (bufferSize & 0x3);
 
-						asCExprContext lctx(engine);
-						lctx.bc.InstrSHORT_DW(asBC_PshListElmnt, bufferVar, bufferSize);
-						lctx.type.Set(dt);
-						lctx.type.isLValue = true;
-						lctx.type.isExplicitHandle = true;
-						lctx.type.dataType.MakeReference(true);
+						if( dt.GetTypeInfo()->flags & asOBJ_SCOPED )
+							CompileInitListScopedElement(dt, &rctx, bufferVar, bufferSize, valueNode, bcInit);
+						else
+						{
+							asCExprContext lctx(engine);
+							lctx.bc.InstrSHORT_DW(asBC_PshListElmnt, bufferVar, bufferSize);
+							lctx.type.Set(dt);
+							lctx.type.isLValue = true;
+							lctx.type.isExplicitHandle = true;
+							lctx.type.dataType.MakeReference(true);
 
-						asCExprContext ctx(engine);
-						DoAssignment(&ctx, &lctx, &rctx, valueNode, valueNode, ttAssignment, valueNode);
+							asCExprContext ctx(engine);
+							DoAssignment(&ctx, &lctx, &rctx, valueNode, valueNode, ttAssignment, valueNode);
 
-						if( !ctx.type.dataType.IsPrimitive() )
-							ctx.bc.Instr(asBC_PopPtr);
+							if( !ctx.type.dataType.IsPrimitive() )
+								ctx.bc.Instr(asBC_PopPtr);
 
-						// Release temporary variables used by expression
-						ReleaseTemporaryVariable(ctx.type, &ctx.bc);
+							// Release temporary variables used by expression
+							ReleaseTemporaryVariable(ctx.type, &ctx.bc);
 
-						ProcessDeferredParams(&ctx);
+							ProcessDeferredParams(&ctx);
 
-						bcInit.AddCode(&ctx.bc);
+							bcInit.AddCode(&ctx.bc);
+						}
 					}
 				}
 			}

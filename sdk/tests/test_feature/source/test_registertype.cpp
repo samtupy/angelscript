@@ -6,6 +6,7 @@
 #else
 #include <stdlib.h>
 #endif
+#include <set>
 
 // olc::vX2d - A generic 2D vector type
 // https://github.com/OneLoneCoder/olcPixelGameEngine/blob/master/olcPixelGameEngine.h#L608-L671
@@ -107,6 +108,7 @@ bool TestHandleType();
 bool TestIrrTypes();
 bool TestRefScoped();
 bool TestAlignedScoped();
+bool TestScopedInitList();
 bool TestHelper();
 
 int g_widget;
@@ -455,6 +457,7 @@ bool Test()
 {
 	bool fail = TestHelper();
 	fail = TestAlignedScoped() || fail;
+	fail = TestScopedInitList() || fail;
 	fail = TestHandleType() || fail;
 	fail = TestIrrTypes() || fail;
 	int r = 0;
@@ -1946,6 +1949,132 @@ bool TestRefScoped()
 
 
 	engine->Release();
+
+	return fail;
+}
+
+//////////////////////////////////////
+// Initialization lists with scoped reference types
+// Scoped types have no AddRef behaviour so the list buffer must own its own copy of each element
+// instead of sharing the object produced by the expression, which is released after the element
+// has been initialized. Each live object is tracked so that a release of an object that was never
+// created or was already released (i.e. a dangling pointer in the list buffer) is detected.
+
+static std::set<int*> scopedListLive;
+static int scopedListBadRelease = 0;
+static int *ScopedList_Factory() { int *p = new int(0); scopedListLive.insert(p); return p; }
+static int *ScopedList_FactoryValue(int v) { int *p = new int(v); scopedListLive.insert(p); return p; }
+static int *ScopedList_FactoryCopy(const int &o) { int *p = new int(o); scopedListLive.insert(p); return p; }
+static void ScopedList_Release(int *p)
+{
+	if( scopedListLive.erase(p) == 0 )
+	{
+		// Don't delete memory we don't own, just record the error
+		scopedListBadRelease++;
+		return;
+	}
+	delete p;
+}
+static int &ScopedList_Assign(const int &o, int &self) { self = o; return self; }
+static int ScopedList_GetValue(int *self) { return *self; }
+
+// A list factory that only reads the values, leaving the engine to release the list buffer
+static int scopedListSum = 0;
+static int scopedListSumObj = 0;
+static int *ScopedList_SumDefault() { return &scopedListSumObj; }
+static int *ScopedList_SumFactory(void *list)
+{
+	asUINT count = *(asUINT*)list;
+	int **elements = (int**)((asUINT*)list + 1);
+	scopedListSum = 0;
+	for( asUINT n = 0; n < count; n++ )
+		scopedListSum += *elements[n];
+	return &scopedListSumObj;
+}
+
+bool TestScopedInitList()
+{
+	bool fail = false;
+	CBufferedOutStream bout;
+
+	SKIP_ON_MAX_PORT
+	{
+		asIScriptEngine *engine = asCreateScriptEngine();
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &bout, asCALL_THISCALL);
+		RegisterScriptArray(engine, false);
+		engine->RegisterGlobalFunction("void assert(bool)", asFUNCTION(Assert), asCALL_GENERIC);
+
+		engine->RegisterObjectType("scoped", 0, asOBJ_REF | asOBJ_SCOPED);
+		engine->RegisterObjectBehaviour("scoped", asBEHAVE_FACTORY, "scoped @f()", asFUNCTION(ScopedList_Factory), asCALL_CDECL);
+		engine->RegisterObjectBehaviour("scoped", asBEHAVE_FACTORY, "scoped @f(int)", asFUNCTION(ScopedList_FactoryValue), asCALL_CDECL);
+		engine->RegisterObjectBehaviour("scoped", asBEHAVE_FACTORY, "scoped @f(const scoped &in)", asFUNCTION(ScopedList_FactoryCopy), asCALL_CDECL);
+		engine->RegisterObjectBehaviour("scoped", asBEHAVE_RELEASE, "void f()", asFUNCTION(ScopedList_Release), asCALL_CDECL_OBJLAST);
+		engine->RegisterObjectMethod("scoped", "scoped &opAssign(const scoped &in)", asFUNCTION(ScopedList_Assign), asCALL_CDECL_OBJLAST);
+		engine->RegisterObjectMethod("scoped", "int get_value() const property", asFUNCTION(ScopedList_GetValue), asCALL_CDECL_OBJLAST);
+
+		engine->RegisterObjectType("scopedsum", 0, asOBJ_REF | asOBJ_NOCOUNT);
+		engine->RegisterObjectBehaviour("scopedsum", asBEHAVE_FACTORY, "scopedsum @f()", asFUNCTION(ScopedList_SumDefault), asCALL_CDECL);
+		engine->RegisterObjectBehaviour("scopedsum", asBEHAVE_LIST_FACTORY, "scopedsum @f(int &in) {repeat scoped}", asFUNCTION(ScopedList_SumFactory), asCALL_CDECL);
+
+		// The array add-on takes ownership of the elements in the list buffer
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test",
+			"scoped make(int v) { return scoped(v); } \n"
+			"void main() \n"
+			"{ \n"
+			"  array<scoped> a = {scoped(1), scoped(2), make(3)}; \n"
+			"  assert( a.length() == 3 && a[0].value == 1 && a[1].value == 2 && a[2].value == 3 ); \n"
+			"  scoped s(4); \n"
+			"  { \n"
+			"    array<scoped> b = {s, s}; \n"
+			"    assert( b[0].value == 4 && b[1].value == 4 ); \n"
+			"  } \n"
+			"  assert( s.value == 4 ); \n"
+			"  array<scoped> c = {scoped(5), , s}; \n"
+			"  assert( c.length() == 3 && c[0].value == 5 && c[1].value == 0 && c[2].value == 4 ); \n"
+			"  array<array<scoped>> d = {{scoped(6)}, {s}}; \n"
+			"  assert( d[0][0].value == 6 && d[1][0].value == 4 ); \n"
+			"} \n"
+			"void sum() \n"
+			"{ \n"
+			"  scoped s(10); \n"
+			"  scopedsum t = {scoped(1), s, scoped(100)}; \n"
+			"  assert( s.value == 10 ); \n"
+			"} \n");
+		int r = mod->Build();
+		if( r < 0 )
+			TEST_FAILED;
+
+		r = ExecuteString(engine, "main()", mod);
+		if( r != asEXECUTION_FINISHED )
+			TEST_FAILED;
+
+		// The engine releases the list buffer when the list factory doesn't take ownership of the elements
+		r = ExecuteString(engine, "sum()", mod);
+		if( r != asEXECUTION_FINISHED )
+			TEST_FAILED;
+		if( scopedListSum != 111 )
+			TEST_FAILED;
+
+		if( bout.buffer != "" )
+		{
+			PRINTF("%s", bout.buffer.c_str());
+			TEST_FAILED;
+		}
+
+		engine->ShutDownAndRelease();
+
+		if( scopedListBadRelease != 0 )
+		{
+			PRINTF("%d scoped objects were released that were not alive\n", scopedListBadRelease);
+			TEST_FAILED;
+		}
+		if( !scopedListLive.empty() )
+		{
+			PRINTF("%d scoped objects were leaked\n", (int)scopedListLive.size());
+			TEST_FAILED;
+		}
+	}
 
 	return fail;
 }
